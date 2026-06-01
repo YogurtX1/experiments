@@ -1,31 +1,30 @@
 use core::fmt::{self, Write};
-use super::write;
+use crate::syscall::sys_write;
 
-const STDOUT: usize = 1;
-
-struct Stdout;
+pub struct Stdout;
 
 impl Write for Stdout {
     fn write_str(&mut self, s: &str) -> fmt::Result {
-        write(STDOUT, s.as_bytes());
+        sys_write(1, s.as_ptr(), s.len());
         Ok(())
     }
 }
 
-pub fn print(args: fmt::Arguments) {
-    Stdout.write_fmt(args).unwrap();
-}
-
 #[macro_export]
 macro_rules! print {
-    ($fmt: literal $(, $($arg: tt)+)?) => {
-        $crate::console::print(format_args!($fmt $(, $($arg)+)?));
-    }
+    ($($arg:tt)*) => ({
+        let _ = core::fmt::write(&mut $crate::console::Stdout, format_args!($($arg)*));
+    });
 }
 
 #[macro_export]
 macro_rules! println {
-    ($fmt: literal $(, $($arg: tt)+)?) => {
-        $crate::console::print(format_args!(concat!($fmt, "\n") $(, $($arg)+)?));
-    }
+    () => ($crate::print!("\n"));
+    ($($arg:tt)*) => ({
+        $crate::print!($($arg)*);
+        $crate::print!("\n");
+    });
 }
+
+pub use print;
+pub use println;

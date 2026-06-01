@@ -1,21 +1,19 @@
 TARGET := riscv64gc-unknown-none-elf
 MODE := release
-APP_DIR := src/bin
-TARGET_DIR := target/$(TARGET)/$(MODE)
-APPS := $(wildcard $(APP_DIR)/*.rs)
-ELFS := $(patsubst $(APP_DIR)/%.rs, $(TARGET_DIR)/%, $(APPS))
-BINS := $(patsubst $(APP_DIR)/%.rs, $(TARGET_DIR)/%.bin, $(APPS))
+KERNEL_ELF := target/$(TARGET)/$(MODE)/os
 
-OBJDUMP := rust-objdump --arch-name=riscv64
-OBJCOPY := rust-objcopy --binary-architecture=riscv64
+$(KERNEL_ELF): src/*.rs src/*/*.rs src/*.S build_user
+	cargo build --release
 
-elf:
-	@cargo build --release
-	@echo $(APPS)
-	@echo $(ELFS)
-	@echo $(BINS)
+build_user:
+	@make -C user build
 
-binary: elf
-	$(foreach elf, $(ELFS), $(OBJCOPY) $(elf) --strip-all -O binary $(patsubst $(TARGET_DIR)/%, $(TARGET_DIR)/%.bin, $(elf));)
+run: $(KERNEL_ELF)
+	qemu-system-riscv64 -machine virt -nographic -bios default -kernel $(KERNEL_ELF)
 
-build: binary
+clean:
+	cargo clean
+	@make -C user clean
+	rm -f target/$(TARGET)/$(MODE)/os.bin
+
+.PHONY: run clean build_user

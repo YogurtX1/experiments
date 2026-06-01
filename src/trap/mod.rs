@@ -1,22 +1,25 @@
-use core::arch::global_asm;
+use core::arch::global_asm; // 🎯 关键：引入全局汇编宏
 use riscv::register::{
-    mtvec::TrapMode,
-    stvec,
     scause::{self, Trap, Exception},
     stval,
+    stvec,
+    utvec::TrapMode,
 };
 use crate::syscall::syscall;
-use crate::batch::run_next_app;
+use crate::task::run_next_task;
 
-mod context;
-pub use context::TrapContext;
-
+// 🎯 核心修复：把保存/恢复用户态上下文的 trap.S 嵌入进来！
 global_asm!(include_str!("trap.S"));
 
+pub use context::TrapContext;
+pub mod context;
+
 pub fn init() {
-    extern "C" { fn __alltraps(); }
+    extern "C" {
+        fn __alltraps();
+    }
     unsafe {
-        stvec::write(__alltraps as *const () as usize, TrapMode::Direct);
+        stvec::write(__alltraps as usize, TrapMode::Direct);
     }
 }
 
@@ -24,19 +27,15 @@ pub fn init() {
 pub fn trap_handler(cx: &mut TrapContext) -> &mut TrapContext {
     let scause = scause::read();
     let stval = stval::read();
+    
     match scause.cause() {
         Trap::Exception(Exception::UserEnvCall) => {
             cx.sepc += 4;
             cx.x[10] = syscall(cx.x[17], [cx.x[10], cx.x[11], cx.x[12]]) as usize;
         }
-        Trap::Exception(Exception::StoreFault) |
-        Trap::Exception(Exception::StorePageFault) => {
-            println!("[kernel] PageFault in application, core dumped.");
-            run_next_app();
-        }
-        Trap::Exception(Exception::IllegalInstruction) => {
-            println!("[kernel] IllegalInstruction in application, core dumped.");
-            run_next_app();
+        Trap::Exception(Exception::InstructionFault) => {
+            println!("[kernel] InstructionFault in application, bad addr = {:#x}, core dumped.", stval);
+            run_next_task();
         }
         _ => {
             panic!("Unsupported trap {:?}, stval = {:#x}!", scause.cause(), stval);

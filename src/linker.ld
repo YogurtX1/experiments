@@ -1,33 +1,28 @@
 OUTPUT_ARCH(riscv)
 ENTRY(_start)
 
+BASE_ADDRESS = 0x80200000;
+
 SECTIONS
 {
-    . = 0x80200000;
+    . = BASE_ADDRESS;
     .text : {
         *(.text.entry)
         *(.text .text.*)
     }
     .rodata : {
         *(.rodata .rodata.*)
-        *(.srodata .srodata.*)
     }
     .data : {
         *(.data .data.*)
-        *(.sdata .sdata.*)
     }
     .bss : {
+        sbss = .;
         *(.bss .bss.*)
         *(.sbss .sbss.*)
-    }
-    .stack : {
-        *(.bss.stack)
+        ebss = .;
     }
     /DISCARD/ : {
         *(.eh_frame)
-        *(.comment)
-        *(.riscv.attributes)
-        *(.note*)
-        /* 不要丢弃 .shstrtab 等 */
     }
 }

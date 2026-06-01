@@ -1,0 +1,1 @@
+/os/user/target/riscv64gc-unknown-none-elf/release/00write_a: /os/user/build.rs /os/user/src/bin/00write_a.rs /os/user/src/console.rs /os/user/src/lang_items.rs /os/user/src/lib.rs /os/user/src/syscall.rs
