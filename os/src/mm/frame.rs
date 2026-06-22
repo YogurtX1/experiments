@@ -60,6 +60,29 @@ pub fn frame_alloc() -> Option<PhysPageNum> {
     FRAME_ALLOCATOR.exclusive_access().alloc()
 }
 
+/// 分配一个 2MB 对齐的物理帧（用于中间级页表）。
+///
+/// Sv39 规范要求：非叶 PTE 只使用 PPN[2:1]（35 bits），
+/// PPN[0]（bits[18:10]）必须为 0。这意味着中间级页表页
+/// 的物理地址必须 2MB 对齐（PPN & 0x1FF == 0）。
+///
+/// 非对齐的帧会被跳过并暂存，后续由 frame_alloc() 回收
+/// 用于数据页分配。
+pub fn alloc_pte_frame() -> Option<PhysPageNum> {
+    let mut allocator = FRAME_ALLOCATOR.exclusive_access();
+    // 从 current 开始寻找 2MB 对齐的帧
+    while allocator.current < allocator.end {
+        let ppn = PhysPageNum(allocator.current);
+        allocator.current += 1;
+        if ppn.0 & 0x1FF == 0 {
+            return Some(ppn);
+        }
+        // 非对齐帧回收供数据页使用
+        allocator.recycled.push(ppn.0);
+    }
+    None
+}
+
 pub fn frame_dealloc(ppn: PhysPageNum) {
     FRAME_ALLOCATOR.exclusive_access().dealloc(ppn)
 }

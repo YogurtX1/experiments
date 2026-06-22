@@ -4,16 +4,22 @@ pub mod heap;
 pub mod map_area;
 pub mod memory_set;
 pub mod page_table;
+pub mod vpn_range;
 
 use crate::config::{KERNEL_HEAP_SIZE, MEMORY_END, PAGE_SIZE, TRAMPOLINE};
-use address::PhysPageNum;
 use frame::init_frame_allocator;
 use lazy_static::lazy_static;
 
-pub use frame::{frame_alloc, frame_dealloc};
+pub use frame::{frame_alloc, frame_dealloc, alloc_pte_frame};
 pub use map_area::{MapArea, MapType};
 pub use memory_set::MemorySet;
-pub use page_table::PageTable;
+pub use page_table::{
+    PageTable, PageTableEntry,
+    translated_byte_buffer,
+    translated_str,
+    translated_refmut,
+};
+pub use page_table::PTEFlags as MapPermission;
 
 lazy_static! {
     pub static ref KERNEL_SPACE: crate::sync::UPSafeCell<MemorySet> =
@@ -39,11 +45,11 @@ pub fn init_kernel_memory() {
     // 2. 初始化帧分配器 (跳过堆占用的物理页)
     let ekernel_addr = ekernel as *const () as usize;
 
-    let _ek_floor = PhysPageNum(ekernel_addr / PAGE_SIZE);
-    let ek_ceil = PhysPageNum((ekernel_addr + PAGE_SIZE - 1) / PAGE_SIZE);
+    let _ek_floor = address::PhysPageNum(ekernel_addr / PAGE_SIZE);
+    let ek_ceil = address::PhysPageNum((ekernel_addr + PAGE_SIZE - 1) / PAGE_SIZE);
     let heap_pages = (KERNEL_HEAP_SIZE + PAGE_SIZE - 1) / PAGE_SIZE;
-    let frame_start = PhysPageNum(ek_ceil.0 + heap_pages);
-    let end = PhysPageNum(MEMORY_END / PAGE_SIZE);
+    let frame_start = address::PhysPageNum(ek_ceil.0 + heap_pages);
+    let end = address::PhysPageNum(MEMORY_END / PAGE_SIZE);
 
     init_frame_allocator(frame_start, end);
     println!(
@@ -105,7 +111,6 @@ pub fn init_kernel_memory() {
 
     // 映射帧分配器范围 (使用 2MB 大页 + 少量 4KB 页补齐非对齐头部)
     {
-        use crate::mm::address::VirtAddr;
         let huge_size: usize = 2 * 1024 * 1024; // 2MB
         let huge_aligned = |addr: usize| (addr + huge_size - 1) / huge_size * huge_size;
 
@@ -184,4 +189,31 @@ pub fn init_trampoline() -> PhysPageNum {
     );
 
     frame
+}
+
+// 导出地址类型别名
+pub use address::{PhysAddr, VirtAddr, PhysPageNum, VirtPageNum};
+
+pub fn init() {
+    init_kernel_memory();
+    println!("[kernel] Memory system initialized");
+
+    // 激活内核页表
+    let kernel_satp = KERNEL_SPACE.exclusive_access().page_table.satp();
+    unsafe {
+        riscv::register::satp::write(kernel_satp);
+        core::arch::asm!("sfence.vma", options(nomem, nostack));
+    }
+    println!("[kernel] Kernel page table activated, satp={:#x}", kernel_satp);
+
+    // 更新 stvec 为 trampoline 地址
+    crate::trap::set_trampoline_stvec(TRAMPOLINE);
+}
+
+pub fn remap_test() {
+    // 简单的页表重映射测试：验证内核虚拟地址空间正常工作
+    let kernel_space = KERNEL_SPACE.exclusive_access();
+    if let Some(_) = kernel_space.translate(TRAMPOLINE.into()) {
+        println!("[kernel] remap_test: trampoline accessible OK");
+    }
 }

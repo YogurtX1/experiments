@@ -6,20 +6,16 @@ use riscv::register::{
     sie, stval, stvec,
 };
 
-use crate::config::PAGE_SIZE;
-use crate::mm::address::VirtAddr;
+use crate::config::TRAMPOLINE;
 use crate::syscall::syscall;
-use crate::task::{exit_current_and_run_next, suspend_current_and_run_next, TASK_MANAGER};
+use crate::task::{exit_current_and_run_next, suspend_current_and_run_next, current_trap_cx};
 pub use context::TrapContext;
 
 global_asm!(include_str!("trap.S"));
 
 pub fn init() {
-    extern "C" {
-        fn __alltraps();
-    }
     unsafe {
-        stvec::write(__alltraps as *const () as usize, stvec::TrapMode::Direct);
+        stvec::write(TRAMPOLINE, stvec::TrapMode::Direct);
     }
 }
 
@@ -27,7 +23,6 @@ pub fn set_trampoline_stvec(trampoline_va: usize) {
     unsafe {
         stvec::write(trampoline_va, stvec::TrapMode::Direct);
     }
-    println!("[kernel] stvec set to trampoline: {:#x}", trampoline_va);
 }
 
 pub fn enable_timer_interrupt() {
@@ -36,92 +31,124 @@ pub fn enable_timer_interrupt() {
     }
 }
 
+pub fn set_kernel_trap_entry() {
+    unsafe {
+        stvec::write(trap_handler as *const () as usize, stvec::TrapMode::Direct);
+    }
+}
+
 #[no_mangle]
-pub fn trap_handler(cx: &mut TrapContext) -> &TrapContext {
+pub fn trap_handler() -> ! {
+    set_kernel_trap_entry();
     let scause = scause::read();
     let stval = stval::read();
-
+    // ★ 诊断: 比较 CPU sstatus CSR 与内存 TrapContext.sstatus
+    let cpu_sstatus = unsafe { riscv::register::sstatus::read().bits() };
+    let mem_sstatus = current_trap_cx().sstatus;
+    crate::println!("[trap_handler] entered! scause={:?}, stval={:#x}, sepc={:#x}",
+        scause.cause(), stval, current_trap_cx().sepc);
+    crate::println!("[trap_handler] CPU sstatus={:#x}, TrapCtx sstatus={:#x}, FS_CPU={}, FS_MEM={}",
+        cpu_sstatus, mem_sstatus,
+        (cpu_sstatus >> 13) & 3, (mem_sstatus >> 13) & 3
+    );
+    if cpu_sstatus != mem_sstatus {
+        crate::println!("[trap_handler] *** MISMATCH: CPU sstatus != TrapCtx sstatus! ***");
+    }
     match scause.cause() {
         Trap::Exception(Exception::UserEnvCall) => {
+            // jump to next instruction anyway
+            let cx = current_trap_cx();
             cx.sepc += 4;
-            let syscall_id = cx.x[17];
-            let args = [cx.x[10], cx.x[11], cx.x[12]];
-
-            if syscall_id == 64 {
-                // sys_write
-                let fd = args[0];
-                let user_buf = args[1];
-                let len = args[2];
-
-                if fd == 1 {
-                    let tm = TASK_MANAGER.exclusive_access();
-                    let cur = tm.inner.current_task;
-                    let ms = tm.inner.tasks[cur].memory_set.as_ref()
-                        .expect("No user memory set");
-
-                    let mut remaining = len;
-                    let mut current_va = VirtAddr(user_buf);
-
-                    while remaining > 0 {
-                        let page_offset = current_va.page_offset();
-                        let chunk_size = core::cmp::min(remaining, PAGE_SIZE - page_offset);
-
-                        let pa = ms.page_table.translate_va(current_va)
-                            .expect("sys_write: unmapped user buffer");
-
-                        let phys_addr = pa.0;
-                        let slice = unsafe {
-                            core::slice::from_raw_parts(phys_addr as *const u8, chunk_size)
-                        };
-                        if let Ok(s) = core::str::from_utf8(slice) {
-                            print!("{}", s);
-                        }
-
-                        remaining -= chunk_size;
-                        current_va = VirtAddr(current_va.0 + chunk_size);
-                    }
-
-                    cx.x[10] = len;
-                } else {
-                    cx.x[10] = (-1isize) as usize;
-                }
-            } else if syscall_id == 93 {
-                // sys_exit
-                println!("[kernel] App exited with code={}", args[0] as isize);
-                exit_current_and_run_next();
-            } else {
-                let result = syscall(syscall_id, args);
-                cx.x[10] = result as usize;
-            }
+            // get system call return value
+            let result = syscall(cx.x[17], [cx.x[10], cx.x[11], cx.x[12]]);
+            // cx is changed during sys_exec, so we have to get it again
+            let cx = current_trap_cx();
+            cx.x[10] = result as usize;
         }
-        Trap::Exception(Exception::StoreFault)
-        | Trap::Exception(Exception::StorePageFault)
-        | Trap::Exception(Exception::LoadFault)
-        | Trap::Exception(Exception::LoadPageFault) => {
+        Trap::Exception(Exception::StoreFault) |
+        Trap::Exception(Exception::StorePageFault) |
+        Trap::Exception(Exception::InstructionFault) |
+        Trap::Exception(Exception::InstructionPageFault) |
+        Trap::Exception(Exception::LoadFault) |
+        Trap::Exception(Exception::LoadPageFault) => {
             println!(
-                "[kernel] PageFault in app, addr={:#x}, ip={:#x}, kernel killed it",
-                stval, cx.sepc
+                "[kernel] {:?} in application, bad addr = {:#x}, bad instruction = {:#x}, core dumped.",
+                scause.cause(),
+                stval,
+                current_trap_cx().sepc,
             );
-            exit_current_and_run_next();
+            exit_current_and_run_next(-2);
         }
         Trap::Exception(Exception::IllegalInstruction) => {
+            let cx = current_trap_cx();
+            let sepc = cx.sepc;
+            // ★ 诊断: 直接 dump 故障地址处的 32 字节 (内核恒等映射)
+            crate::print!("[kernel] Hex dump at sepc={:#x}: ", sepc);
+            for offset in 0..32 {
+                let va = sepc.wrapping_add(offset);
+                // 先尝试通过用户页表翻译
+                let byte = {
+                    use crate::mm::page_table::PageTable;
+                    use crate::mm::VirtAddr;
+                    let pt = PageTable::from_token(cx.user_satp);
+                    pt.translate_va(VirtAddr::from(va))
+                        .map(|pa| unsafe { *(pa.0 as *const u8) })
+                };
+                match byte {
+                    Some(b) => crate::print!("{:02x} ", b),
+                    None => { crate::print!("?? "); break; }
+                }
+            }
+            crate::println!();
             println!(
-                "[kernel] IllegalInstruction in app, ip={:#x}, kernel killed it",
-                cx.sepc
+                "[kernel] IllegalInstruction in application, sepc={:#x}, stval={:#x}, core dumped.",
+                sepc, stval
             );
-            exit_current_and_run_next();
+            exit_current_and_run_next(-3);
         }
         Trap::Interrupt(Interrupt::SupervisorTimer) => {
             crate::timer::set_next_trigger();
             suspend_current_and_run_next();
         }
         _ => {
-            panic!(
-                "Unsupported trap {:?}, stval = {:#x}!",
-                scause.cause(),
-                stval
-            );
+            panic!("Unsupported trap {:?}, stval = {:#x}!", scause.cause(), stval);
         }
     }
-    cx
+    // ★ 确保定时器已启用 (首次返回用户态时激活, STIE 跨 trap 保持)
+    enable_timer_interrupt();
+    crate::timer::set_next_trigger();
+    // ★ 修复 sstatus.FS: 确保返回用户态时 FS=Dirty, 防止 FP 指令触发 IllegalInstruction
+    //    FS=Initial(01) 在 sret 跨特权级时可能被清零, FS=Dirty(11) 可被保留.
+    {
+        let cx = current_trap_cx();
+        cx.sstatus &= !(3 << 13);   // 清除 FS 字段
+        cx.sstatus |= (3 << 13);     // 设置 FS=Dirty
+    }
+    trap_return();
+}
+
+fn trap_return() -> ! {
+    extern "C" {
+        fn __alltraps();
+        fn __restore();
+    }
+    let alltraps_va = __alltraps as *const () as usize;
+    let restore_offset = __restore as *const () as usize - alltraps_va;
+    let restore_va = TRAMPOLINE + restore_offset;
+
+    let cx = current_trap_cx();
+    let cx_phys = cx as *const TrapContext as usize;
+
+    // 将 stvec 重新指向 trampoline（为下次用户态 trap 准备）
+    set_trampoline_stvec(TRAMPOLINE);
+
+    unsafe {
+        core::arch::asm!(
+            "fence.i",
+            "jr {restore}",
+            restore = in(reg) restore_va,
+            in("a0") cx_phys,
+        );
+    }
+    unreachable!();
 }

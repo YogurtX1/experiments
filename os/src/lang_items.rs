@@ -10,7 +10,7 @@ fn panic(info: &PanicInfo) -> ! {
             info.message(),
         );
     } else {
-        println!("[kernel] Panic: {:?}", info.message());
+        println!("[kernel] Panic: {}", info.message());
     }
     crate::sbi::shutdown();
 }

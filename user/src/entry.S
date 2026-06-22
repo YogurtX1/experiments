@@ -16,15 +16,18 @@ _start:
     .option pop
 
     # 2. 设置栈指针
-    la sp, _stack_start
+    # sp already set by kernel via TrapContext
 
     # 3. 清零 BSS
     call clear_bss_asm
 
-    # 4. 调用 Rust main() → 返回值在 a0
+    # 4. 初始化用户堆（Rust 函数）
+    call _start_rust
+
+    # 5. 调用 Rust main() → 返回值在 a0
     call main
 
-    # 5. sys_exit(exit_code)
+    # 6. sys_exit(exit_code)
     #    a1 = arg0 = exit_code (main 的返回值)
     #    a0 = id = 93
     mv a1, a0

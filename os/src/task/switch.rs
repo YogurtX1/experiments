@@ -1,5 +1,14 @@
 use core::arch::global_asm;
 
+use super::TaskContext;
+
+extern "C" {
+    pub fn __switch(
+        current_cx: *const TaskContext,
+        next_cx: *const TaskContext,
+    );
+}
+
 global_asm!(
     r#"
 .altmacro

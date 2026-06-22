@@ -1,11 +1,34 @@
 use core::arch::asm;
 
 const SBI_CONSOLE_PUTCHAR: usize = 1;
+const SBI_CONSOLE_GETCHAR: usize = 2;
 const SBI_SET_TIMER: usize = 0;
 const SBI_SHUTDOWN: usize = 8;
 
 pub fn console_putchar(c: usize) {
-    sbi_call(SBI_CONSOLE_PUTCHAR, c, 0, 0);
+    // ★ black_box 防止编译器 DCE 消除 ecall 指令
+    core::hint::black_box(sbi_call(SBI_CONSOLE_PUTCHAR, c, 0, 0));
+}
+
+/// 底层逐字符输出，完全绕过 format_args!/println! 宏机制
+/// 内联 asm! 直接在函数中，杜绝编译器优化消除
+#[inline(never)]
+pub fn debug_puts(s: &str) {
+    for byte in s.bytes() {
+        unsafe {
+            core::arch::asm!(
+                "ecall",
+                in("a7") 1usize,
+                in("a0") byte as usize,
+                in("a1") 0usize,
+                in("a2") 0usize,
+            );
+        }
+    }
+}
+
+pub fn console_getchar() -> usize {
+    sbi_call(SBI_CONSOLE_GETCHAR, 0, 0, 0)
 }
 
 #[inline(always)]

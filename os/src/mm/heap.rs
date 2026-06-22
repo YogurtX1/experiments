@@ -7,7 +7,7 @@ static HEAP_ALLOCATOR: LockedHeap = LockedHeap::empty();
 pub static mut HEAP_SPACE: [u8; KERNEL_HEAP_SIZE] = [0; KERNEL_HEAP_SIZE];
 
 pub fn init_heap() {
-    let heap_ptr = core::ptr::addr_of_mut!(HEAP_SPACE);
+    let heap_ptr = unsafe { core::ptr::addr_of_mut!(HEAP_SPACE) };
     unsafe {
         HEAP_ALLOCATOR
             .lock()
